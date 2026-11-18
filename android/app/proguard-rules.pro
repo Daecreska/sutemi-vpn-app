@@ -1,0 +1,6 @@
+-keep class io.nekohasekai.libbox.** { *; }
+-keep class libbox.** { *; }
+-keep class go.** { *; }
+-dontwarn io.nekohasekai.libbox.**
+-dontwarn go.**
+-keep class com.sutemi.vpn.** { *; }
