@@ -1,13 +1,10 @@
-name: Build Sutemi VPN Mobile (Android)
+name: Build SUTEMI VPN Android APK
 
 on:
   push:
     branches: [ main, master ]
-    tags: [ 'v*' ]
+  pull_request:
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   build-android:
@@ -17,50 +14,72 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Detect Flutter project directory
+        id: paths
+        run: |
+          if [ -f "mobile/pubspec.yaml" ]; then
+            echo "dir=mobile" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      - name: Set up Go 1.23
+      - name: Set up Android SDK & NDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36 & NDK 28.2.13676358
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;35.0.0" "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Set up Go 1.23 (for libbox.aar)
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: "1.23"
 
-      - name: Set up Flutter
+      - name: Set up Flutter 3.41.9
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: "3.41.9"
           channel: stable
-          flutter-version: '3.41.9'
           cache: true
 
-      - name: Install Android NDK 26.3.11579264
+      - name: Ensure libbox.aar exists
+        working-directory: ${{ steps.paths.outputs.dir }}
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "ndk;26.3.11579264"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          if [ ! -s "android/app/libs/libbox.aar" ]; then
+            chmod +x scripts/build_libbox.sh
+            ./scripts/build_libbox.sh
+          fi
 
-      - name: Build libbox.aar (sing-box v1.10.7)
+      - name: Ensure Android res files exist
+        working-directory: ${{ steps.paths.outputs.dir }}
         run: |
-          git clone --depth 1 --branch v1.10.7 https://github.com/SagerNet/sing-box.git /tmp/sing-box
-          cd /tmp/sing-box
+          if [ ! -f "android/app/src/main/res/values/styles.xml" ] || [ ! -f "android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" ]; then
+            RES_DIR="$(pwd)/android/app/src/main/res"
+            flutter create --no-pub --platforms=android /tmp/flutter_res_tpl
+            mkdir -p "$RES_DIR"
+            (cd /tmp/flutter_res_tpl/android/app/src/main/res && find . -type f | while IFS= read -r f; do
+              if [ ! -e "$RES_DIR/$f" ]; then
+                mkdir -p "$(dirname "$RES_DIR/$f")"
+                cp "$f" "$RES_DIR/$f"
+              fi
+            done)
+          fi
 
-          make lib_install
-          export PATH="$(go env GOPATH)/bin:$PATH"
-          gomobile init || true
-
-          go run ./cmd/internal/build_libbox -target android
-
-          mkdir -p "$GITHUB_WORKSPACE/android/app/libs"
-          cp libbox.aar "$GITHUB_WORKSPACE/android/app/libs/libbox.aar"
-
-      - name: Install Flutter dependencies & run tests
+      - name: Install Flutter packages & run Dart unit tests
+        working-directory: ${{ steps.paths.outputs.dir }}
         run: |
           flutter pub get
-          flutter test || true
+          flutter test
 
-      - name: Build Android APKs
+      - name: Build Android APKs (Debug + Release split-per-abi)
+        working-directory: ${{ steps.paths.outputs.dir }}
         run: |
           flutter build apk --debug
           flutter build apk --release --split-per-abi
@@ -69,10 +88,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sutemi-vpn-apks
-          path: build/app/outputs/flutter-apk/*.apk
-
-      - name: Create GitHub Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: build/app/outputs/flutter-apk/*.apk
+          path: |
+            ${{ steps.paths.outputs.dir }}/build/app/outputs/flutter-apk/*.apk
